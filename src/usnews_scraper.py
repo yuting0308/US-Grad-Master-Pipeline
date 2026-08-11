@@ -80,34 +80,37 @@ class USNewsScraper:
         return pd.DataFrame(results)
 
     def _parse_page(self, soup: BeautifulSoup) -> list:
-        """Parse HTML DOM structure to extract university details."""
+        """Parse HTML DOM structure to extract university details accurately."""
         parsed_data = []
-        cards = soup.select("div[class*='DetailCard'], div[class*='Card-'], div[class*='Box-']")
 
-        if not cards:
-            cards = soup.find_all("div", class_=lambda x: x and "card" in x.lower())
+        # Find school card blocks
+        cards = soup.select("div[class*='DetailCard'], div[class*='Card-']")
 
         for card in cards:
-            name_tag = card.select_one("h2, a[class*='SchoolName'], div[class*='heading'], a[class*='Link-']")
+            # 1. Extract true school name
+            name_tag = card.select_one("h2 a, a[class*='SchoolName'], div[class*='heading'] a")
             school_name = name_tag.get_text(strip=True) if name_tag else None
 
-            if not school_name:
+            # Skip header items and invalid rows
+            if not school_name or "Dashboard" in school_name or "Schools" in school_name or "Best" in school_name:
                 continue
 
+            # 2. Extract rank number
             rank_tag = card.select_one("div[class*='Rank'], span[class*='rank'], div[class*='Badge']")
             rank_num = None
             if rank_tag:
-                rank_str = rank_tag.get_text(strip=True)
-                match = re.search(r"#(\d+)", rank_str)
+                match = re.search(r"#(\d+)", rank_tag.get_text(strip=True))
                 if match:
                     rank_num = int(match.group(1))
 
-            link_tag = card.select_one("a[href*='/best-graduate-schools/']")
-            detail_url = (
-                f"https://www.usnews.com{link_tag['href']}"
-                if link_tag and link_tag.get("href")
-                else None
-            )
+            # 3. Extract clean detail URL (prevent double https:// prefix)
+            href = name_tag.get("href") if name_tag else None
+            detail_url = None
+            if href:
+                if href.startswith("http"):
+                    detail_url = href
+                else:
+                    detail_url = f"https://www.usnews.com{href}"
 
             parsed_data.append({
                 "school_name": school_name,
@@ -117,7 +120,7 @@ class USNewsScraper:
             })
 
         return parsed_data
-
+    
     def _get_fallback_data(self) -> list:
         """Fallback dataset providing Top US CS universities to ensure pipeline continuity."""
         fallback_universities = [
