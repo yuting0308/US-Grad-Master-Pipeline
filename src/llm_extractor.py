@@ -72,11 +72,11 @@ class GeminiExtractor:
         {combined_text[:15000]}
         """
 
+        # Model candidates with full resource prefix based on your API key capability
         candidate_models = [
-            "gemini-2.5-flash",
-            "gemini-2.0-flash",
-            "gemini-1.5-flash",
-            "gemini-1.5-pro",
+            "models/gemini-flash-latest",
+            "models/gemini-2.5-pro",
+            "models/gemini-3.5-flash",
         ]
 
         for model_name in candidate_models:
