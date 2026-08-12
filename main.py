@@ -1,6 +1,8 @@
 import os
 import pandas as pd
 from dotenv import load_dotenv
+
+# 載入 .env 環境變數
 load_dotenv()
 
 from config import DEFAULT_CONFIG, DATA_DIR
@@ -30,43 +32,40 @@ def main():
     print(f"[SUCCESS] Phase 1 Complete. Saved to: {output_path}")
 
     print("\n==========================================")
-    print(" Phase 2: Admissions & Handbook URL Discovery ")
-    print("==========================================")
-
-    url_finder = URLFinder()
-    sample_df = df.head(3).copy()  # 先測試前 3 名學校
-    admissions_urls = []
-    handbook_urls = []
-
-    for _, row in sample_df.iterrows():
-        school_name = row["school_name"]
-        found_urls = url_finder.find_urls_for_school(
-            school_name, subject="Computer Science"
-        )
-        admissions_urls.append(found_urls["admissions_url"])
-        handbook_urls.append(found_urls["handbook_url"])
-
-    sample_df["admissions_url"] = admissions_urls
-    sample_df["handbook_url"] = handbook_urls
-
-    print("\n==========================================")
-    print(" Phase 3: Gemini LLM Structured Extraction ")
+    print(" Phase 2 & 3: URL Discovery & LLM Extraction (Full Top 50) ")
     print("==========================================")
 
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
-        print("[WARN] GEMINI_API_KEY not found in environment. Please set it in .env file.")
+        print("[WARN] GEMINI_API_KEY not found in environment. Please check your .env file.")
         return
 
+    url_finder = URLFinder()
     extractor = GeminiExtractor(api_key=api_key)
 
+    admissions_urls, handbook_urls = [], []
     toefl_overalls, toefl_speakings, gre_statuses, non_thesis_options, notes_list = [], [], [], [], []
 
-    for _, row in sample_df.iterrows():
+    total_schools = len(df)
+    for i, (_, row) in enumerate(df.iterrows(), start=1):
+        school_name = row["school_name"]
+        print(f"\n[{i}/{total_schools}] Processing: {school_name}...")
+
+        # Phase 2: Find URLs
+        found_urls = url_finder.find_urls_for_school(
+            school_name, subject="Computer Science"
+        )
+        adm_url = found_urls["admissions_url"]
+        hb_url = found_urls["handbook_url"]
+
+        admissions_urls.append(adm_url)
+        handbook_urls.append(hb_url)
+
+        # Phase 3: Gemini LLM Extraction
         extracted = extractor.extract_admission_and_handbook_info(
-            school_name=row["school_name"],
-            admissions_url=row["admissions_url"],
-            handbook_url=row["handbook_url"],
+            school_name=school_name,
+            admissions_url=adm_url,
+            handbook_url=hb_url,
         )
 
         toefl_overalls.append(extracted.get("toefl_overall"))
@@ -75,29 +74,33 @@ def main():
         non_thesis_options.append(extracted.get("non_thesis_option"))
         notes_list.append(extracted.get("notes"))
 
-    sample_df["toefl_overall"] = toefl_overalls
-    sample_df["toefl_speaking"] = toefl_speakings
-    sample_df["gre_status"] = gre_statuses
-    sample_df["non_thesis_option"] = non_thesis_options
-    sample_df["notes"] = notes_list
+    # Enrich DataFrame
+    df["admissions_url"] = admissions_urls
+    df["handbook_url"] = handbook_urls
+    df["toefl_overall"] = toefl_overalls
+    df["toefl_speaking"] = toefl_speakings
+    df["gre_status"] = gre_statuses
+    df["non_thesis_option"] = non_thesis_options
+    df["notes"] = notes_list
 
-    final_output_path = os.path.join(DATA_DIR, "usnews_cs_top3_extracted.csv")
-    sample_df.to_csv(final_output_path, index=False, encoding="utf-8-sig")
+    print("\n==========================================")
+    print(" Phase 4: Exporting Final Reports ")
+    print("==========================================")
 
-    print("------------------------------------------")
-    print(f"[SUCCESS] Phase 3 Complete! Saved to: {final_output_path}")
-    print("------------------------------------------")
-    print(
-        sample_df[
-            [
-                "school_name",
-                "toefl_overall",
-                "gre_status",
-                "non_thesis_option",
-                "notes",
-            ]
-        ]
-    )
+    # Export to CSV
+    final_csv = os.path.join(DATA_DIR, "usnews_cs_top50_final.csv")
+    df.to_csv(final_csv, index=False, encoding="utf-8-sig")
+    print(f"[SUCCESS] Final CSV Dataset Saved: {final_csv}")
+
+    # Export to Excel (.xlsx) with formatting
+    final_excel = os.path.join(DATA_DIR, "usnews_cs_top50_final.xlsx")
+    with pd.ExcelWriter(final_excel, engine="openpyxl") as writer:
+        df.to_excel(writer, sheet_name="Top 50 CS Master Programs", index=False)
+    print(f"[SUCCESS] Final Excel Report Saved: {final_excel}")
+
+    print("\n==========================================")
+    print(" ALL PIPELINE PHASES COMPLETED SUCCESSFULLY! ")
+    print("==========================================")
 
 
 if __name__ == "__main__":
