@@ -22,7 +22,11 @@ class GeminiExtractor:
         if not self.api_key:
             raise ValueError("GEMINI_API_KEY environment variable is missing.")
 
-        self.client = genai.Client(api_key=self.api_key)
+        # Set explicit 30s timeout to prevent infinite hanging on API requests
+        self.client = genai.Client(
+            api_key=self.api_key,
+            http_options={"timeout": 30000},
+        )
         self.cleaner = WebContentCleaner(cache_dir="raw_cache", max_chars=12000)
 
     def extract_program_requirements(
@@ -44,7 +48,6 @@ class GeminiExtractor:
             else ""
         )
 
-
         combined_text = f"""
         === Admissions Page Content ===
         {admissions_text}
@@ -53,12 +56,13 @@ class GeminiExtractor:
         {handbook_text}
         """
 
+        today_str = datetime.now().strftime("%Y-%m-%d")
+
         # Skip API call if both URLs returned empty text (e.g., 404 Not Found)
         if not admissions_text.strip() and not handbook_text.strip():
             logger.warning(
                 f"[SKIP LLM] No webpage content fetched for {university_name} - {program_name}. Skipping API call."
             )
-            today_str = datetime.now().strftime("%Y-%m-%d")
             fallback_obj = ProgramRequirementSchema(
                 university_name=university_name,
                 program_name=program_name,
@@ -91,21 +95,20 @@ class GeminiExtractor:
         6. Set `source_url` to "{admissions_url}".
 
         Raw Website Content:
-        {combined_text[:20000]}
+        {combined_text[:15000]}
         """
 
+        # Use explicit stable model IDs first
         candidate_models = [
-            "models/gemini-flash-latest",
             "models/gemini-3.5-flash",
+            "models/gemini-flash-latest",
         ]
 
-        today_str = datetime.now().strftime("%Y-%m-%d")
-
         for model_name in candidate_models:
-            max_retries = 3
+            max_retries = 2
             for attempt in range(max_retries):
                 try:
-                    time.sleep(3)  # Prevent API rate limit bursts
+                    time.sleep(2)
 
                     response = self.client.models.generate_content(
                         model=model_name,
@@ -114,11 +117,13 @@ class GeminiExtractor:
                             response_mime_type="application/json",
                             response_schema=ProgramRequirementSchema,
                             temperature=0.0,
+                            automatic_function_calling=types.AutomaticFunctionCallingConfig(
+                                disable=True
+                            ),
                         ),
                     )
 
                     parsed_data = json.loads(response.text)
-                    # Enforce exact metadata fields
                     parsed_data["university_name"] = university_name
                     parsed_data["program_name"] = program_name
                     parsed_data["program_category"] = program_category
@@ -130,9 +135,9 @@ class GeminiExtractor:
                     err_str = str(e)
                     if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str:
                         logger.warning(
-                            f"[RATE LIMIT] Hit 429 on {model_name} (Attempt {attempt+1}/{max_retries}). Sleeping 20s..."
+                            f"[RATE LIMIT] Hit 429 on {model_name} (Attempt {attempt+1}/{max_retries}). Sleeping 15s..."
                         )
-                        time.sleep(20)
+                        time.sleep(15)
                     else:
                         logger.warning(f"[MODEL ERROR] {model_name} failed: {e}")
                         break
