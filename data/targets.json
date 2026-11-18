@@ -1,0 +1,37 @@
+[
+  {
+    "university_name": "Carnegie Mellon University",
+    "program_name": "Master of Information Systems Management (MISM)",
+    "program_category": "MIS",
+    "admissions_url": "https://www.heinz.cmu.edu/admissions/information-systems/",
+    "handbook_url": "https://www.heinz.cmu.edu/current-students/student-handbooks"
+  },
+  {
+    "university_name": "University of Washington",
+    "program_name": "M.S. in Data Science",
+    "program_category": "MSDS",
+    "admissions_url": "https://www.washington.edu/datasciencemasters/admissions/",
+    "handbook_url": "https://www.washington.edu/datasciencemasters/curriculum/"
+  },
+  {
+    "university_name": "Georgia Institute of Technology",
+    "program_name": "M.S. in Human-Computer Interaction (MS-HCI)",
+    "program_category": "HCI",
+    "admissions_url": "https://mshci.gatech.edu/admissions",
+    "handbook_url": "https://mshci.gatech.edu/curriculum"
+  },
+  {
+    "university_name": "University of Illinois Urbana-Champaign",
+    "program_name": "M.S. in Information Management (MSIM)",
+    "program_category": "MIS",
+    "admissions_url": "https://ischool.illinois.edu/degrees-programs/ms-information-management/apply",
+    "handbook_url": "https://ischool.illinois.edu/degrees-programs/ms-information-management/curriculum"
+  },
+  {
+    "university_name": "University of California, San Diego",
+    "program_name": "M.S. in Computer Science",
+    "program_category": "CS",
+    "admissions_url": "https://cse.ucsd.edu/graduate/admissions",
+    "handbook_url": "https://cse.ucsd.edu/graduate/degree-programs/ms-program"
+  }
+]
