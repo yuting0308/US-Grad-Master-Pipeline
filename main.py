@@ -1,106 +1,118 @@
 import os
+import json
+import logging
 import pandas as pd
 from dotenv import load_dotenv
 
-# 載入 .env 環境變數
 load_dotenv()
 
-from config import DEFAULT_CONFIG, DATA_DIR
-from src.usnews_scraper import USNewsScraper
-from src.url_finder import URLFinder
 from src.llm_extractor import GeminiExtractor
+
+logger = logging.getLogger(__name__)
+
+TARGETS_PATH = os.path.join("data", "targets.json")
+OUTPUT_JSON_PATH = os.path.join("data", "programs_data.json")
+OUTPUT_CSV_PATH = os.path.join("data", "programs_summary.csv")
+
+
+def load_existing_records(json_path: str) -> dict:
+    """Load existing extracted records indexed by (university_name, program_name)."""
+    if not os.path.exists(json_path):
+        return {}
+    try:
+        with open(json_path, "r", encoding="utf-8") as f:
+            records = json.load(f)
+        return {
+            (item["university_name"], item["program_name"]): item
+            for item in records
+            if "university_name" in item and "program_name" in item
+        }
+    except Exception as e:
+        logger.warning(f"[WARN] Could not load existing JSON records: {e}")
+        return {}
+
+
+def export_flattened_csv(records: list, csv_path: str):
+    """Flatten nested JSON fields (prerequisites, deadlines) into a clean summary CSV."""
+    flattened_rows = []
+    for rec in records:
+        deadlines = rec.get("application_deadlines") or {}
+        prereqs = rec.get("prerequisites") or []
+        flattened_rows.append(
+            {
+                "university_name": rec.get("university_name"),
+                "program_name": rec.get("program_name"),
+                "program_category": rec.get("program_category"),
+                "is_stem_designated": rec.get("is_stem_designated"),
+                "thesis_required": rec.get("thesis_required"),
+                "gpa_minimum": rec.get("gpa_minimum"),
+                "toefl_minimum": rec.get("toefl_minimum"),
+                "toefl_notes": rec.get("toefl_notes"),
+                "gre_policy": rec.get("gre_policy"),
+                "prerequisites": "; ".join(prereqs) if prereqs else "None Listed",
+                "priority_deadline": deadlines.get("priority_deadline"),
+                "final_deadline": deadlines.get("final_deadline"),
+                "source_url": rec.get("source_url"),
+                "last_updated": rec.get("last_updated"),
+            }
+        )
+
+    df = pd.DataFrame(flattened_rows)
+    df.to_csv(csv_path, index=False, encoding="utf-8-sig")
 
 
 def main():
-    os.makedirs(DATA_DIR, exist_ok=True)
+    os.makedirs("data", exist_ok=True)
 
-    print("==========================================")
-    print(" Phase 1: US News Scraper Starting... ")
-    print("==========================================")
-
-    scraper = USNewsScraper(
-        subject=DEFAULT_CONFIG["subject"], max_rank=DEFAULT_CONFIG["max_rank"]
-    )
-    df = scraper.scrape()
-
-    if df.empty:
-        print("[ERROR] Scraper finished, but no data was extracted.")
+    if not os.path.exists(TARGETS_PATH):
+        logger.error(f"[ERROR] Target config file not found: {TARGETS_PATH}")
         return
 
-    output_path = os.path.join(DATA_DIR, DEFAULT_CONFIG["output_filename"])
-    df.to_csv(output_path, index=False, encoding="utf-8-sig")
-    print(f"[SUCCESS] Phase 1 Complete. Saved to: {output_path}")
-
-    print("\n==========================================")
-    print(" Phase 2 & 3: URL Discovery & LLM Extraction (Full Top 50) ")
-    print("==========================================")
+    with open(TARGETS_PATH, "r", encoding="utf-8") as f:
+        targets = json.load(f)
 
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
-        print("[WARN] GEMINI_API_KEY not found in environment. Please check your .env file.")
+        logger.error("[ERROR] GEMINI_API_KEY not found in .env file.")
         return
 
-    url_finder = URLFinder()
     extractor = GeminiExtractor(api_key=api_key)
+    records_map = load_existing_records(OUTPUT_JSON_PATH)
 
-    admissions_urls, handbook_urls = [], []
-    toefl_overalls, toefl_speakings, gre_statuses, non_thesis_options, notes_list = [], [], [], [], []
+    total = len(targets)
+    logger.info(f"Starting US-Grad-Master-Pipeline for {total} target programs...")
 
-    total_schools = len(df)
-    for i, (_, row) in enumerate(df.iterrows(), start=1):
-        school_name = row["school_name"]
-        print(f"\n[{i}/{total_schools}] Processing: {school_name}...")
+    for idx, target in enumerate(targets, start=1):
+        univ = target["university_name"]
+        prog = target["program_name"]
+        cat = target.get("program_category", "Other")
+        adm_url = target["admissions_url"]
+        hb_url = target.get("handbook_url", "")
 
-        # Phase 2: Find URLs
-        found_urls = url_finder.find_urls_for_school(
-            school_name, subject="Computer Science"
-        )
-        adm_url = found_urls["admissions_url"]
-        hb_url = found_urls["handbook_url"]
+        logger.info(f"[{idx}/{total}] Processing: {univ} | {prog} ({cat})")
 
-        admissions_urls.append(adm_url)
-        handbook_urls.append(hb_url)
-
-        # Phase 3: Gemini LLM Extraction
-        extracted = extractor.extract_admission_and_handbook_info(
-            school_name=school_name,
+        extracted_record = extractor.extract_program_requirements(
+            university_name=univ,
+            program_name=prog,
+            program_category=cat,
             admissions_url=adm_url,
             handbook_url=hb_url,
+            use_cache=True,
         )
 
-        toefl_overalls.append(extracted.get("toefl_overall"))
-        toefl_speakings.append(extracted.get("toefl_speaking"))
-        gre_statuses.append(extracted.get("gre_status"))
-        non_thesis_options.append(extracted.get("non_thesis_option"))
-        notes_list.append(extracted.get("notes"))
+        # Upsert using composite unique key (university_name, program_name)
+        records_map[(univ, prog)] = extracted_record
 
-    # Enrich DataFrame
-    df["admissions_url"] = admissions_urls
-    df["handbook_url"] = handbook_urls
-    df["toefl_overall"] = toefl_overalls
-    df["toefl_speaking"] = toefl_speakings
-    df["gre_status"] = gre_statuses
-    df["non_thesis_option"] = non_thesis_options
-    df["notes"] = notes_list
+    final_records = list(records_map.values())
 
-    print("\n==========================================")
-    print(" Phase 4: Exporting Final Reports ")
-    print("==========================================")
+    # 1. Export nested structured JSON
+    with open(OUTPUT_JSON_PATH, "w", encoding="utf-8") as f:
+        json.dump(final_records, f, indent=2, ensure_ascii=False)
+    logger.info(f"[SUCCESS] Saved structured JSON dataset to: {OUTPUT_JSON_PATH}")
 
-    # Export to CSV
-    final_csv = os.path.join(DATA_DIR, "usnews_cs_top50_final.csv")
-    df.to_csv(final_csv, index=False, encoding="utf-8-sig")
-    print(f"[SUCCESS] Final CSV Dataset Saved: {final_csv}")
-
-    # Export to Excel (.xlsx) with formatting
-    final_excel = os.path.join(DATA_DIR, "usnews_cs_top50_final.xlsx")
-    with pd.ExcelWriter(final_excel, engine="openpyxl") as writer:
-        df.to_excel(writer, sheet_name="Top 50 CS Master Programs", index=False)
-    print(f"[SUCCESS] Final Excel Report Saved: {final_excel}")
-
-    print("\n==========================================")
-    print(" ALL PIPELINE PHASES COMPLETED SUCCESSFULLY! ")
-    print("==========================================")
+    # 2. Export flattened summary CSV
+    export_flattened_csv(final_records, OUTPUT_CSV_PATH)
+    logger.info(f"[SUCCESS] Saved flattened CSV summary to: {OUTPUT_CSV_PATH}")
 
 
 if __name__ == "__main__":

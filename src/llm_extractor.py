@@ -44,6 +44,7 @@ class GeminiExtractor:
             else ""
         )
 
+
         combined_text = f"""
         === Admissions Page Content ===
         {admissions_text}
@@ -51,6 +52,28 @@ class GeminiExtractor:
         === Curriculum / Handbook Page Content ===
         {handbook_text}
         """
+
+        # Skip API call if both URLs returned empty text (e.g., 404 Not Found)
+        if not admissions_text.strip() and not handbook_text.strip():
+            logger.warning(
+                f"[SKIP LLM] No webpage content fetched for {university_name} - {program_name}. Skipping API call."
+            )
+            today_str = datetime.now().strftime("%Y-%m-%d")
+            fallback_obj = ProgramRequirementSchema(
+                university_name=university_name,
+                program_name=program_name,
+                program_category=program_category,
+                is_stem_designated=None,
+                thesis_required="Not Specified",
+                gpa_minimum=None,
+                toefl_minimum=None,
+                toefl_notes=None,
+                gre_policy="Not Specified",
+                prerequisites=[],
+                source_url=admissions_url,
+                last_updated=today_str,
+            )
+            return fallback_obj.model_dump()
 
         prompt = f"""
         You are an academic admissions data engineer extracting structured requirements for:
