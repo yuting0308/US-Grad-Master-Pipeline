@@ -1,13 +1,19 @@
 import os
 import sys
 import json
+import time
+import logging
+from datetime import datetime
 from typing import Dict, Any
 from google import genai
 from google.genai import types
-from curl_cffi import requests as curl_requests
-from bs4 import BeautifulSoup
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from src.schemas import ProgramRequirementSchema
+from src.cleaner import WebContentCleaner
+
+logger = logging.getLogger(__name__)
 
 
 class GeminiExtractor:
@@ -15,93 +21,112 @@ class GeminiExtractor:
         self.api_key = api_key or os.getenv("GEMINI_API_KEY")
         if not self.api_key:
             raise ValueError("GEMINI_API_KEY environment variable is missing.")
-        
-        # Initialize official google-genai client
+
         self.client = genai.Client(api_key=self.api_key)
+        self.cleaner = WebContentCleaner(cache_dir="raw_cache", max_chars=12000)
 
-    def fetch_webpage_text(self, url: str) -> str:
-        """Fetch webpage HTML content and clean it into plain text."""
-        if not url or not url.startswith("http"):
-            return ""
-
-        try:
-            response = curl_requests.get(url, impersonate="chrome120", timeout=15)
-            if response.status_code == 200:
-                soup = BeautifulSoup(response.text, "html.parser")
-                # Remove non-content elements
-                for script in soup(["script", "style", "nav", "footer"]):
-                    script.extract()
-                text = soup.get_text(separator=" ", strip=True)
-                return text[:10000]  # Limit context length
-        except Exception as e:
-            print(f"[WARN] Failed to fetch text from {url}: {e}")
-
-        return ""
-
-    def extract_admission_and_handbook_info(
-        self, school_name: str, admissions_url: str, handbook_url: str
+    def extract_program_requirements(
+        self,
+        university_name: str,
+        program_name: str,
+        program_category: str,
+        admissions_url: str,
+        handbook_url: str = "",
+        use_cache: bool = True,
     ) -> Dict[str, Any]:
-        """Extract structured admission thresholds and graduation requirements via Gemini API."""
-        print(f"[INFO] Running Gemini Extraction for: {school_name}...")
+        """Extract strictly typed program requirements using Gemini Structured Outputs."""
+        logger.info(f"[EXTRACT] Processing: {university_name} - {program_name}")
 
-        admissions_text = self.fetch_webpage_text(admissions_url)
-        handbook_text = self.fetch_webpage_text(handbook_url)
+        admissions_text = self.cleaner.fetch_and_clean(admissions_url, use_cache=use_cache)
+        handbook_text = (
+            self.cleaner.fetch_and_clean(handbook_url, use_cache=use_cache)
+            if handbook_url
+            else ""
+        )
 
         combined_text = f"""
-        === Admissions Content ===
+        === Admissions Page Content ===
         {admissions_text}
 
-        === Handbook Content ===
+        === Curriculum / Handbook Page Content ===
         {handbook_text}
         """
 
         prompt = f"""
-        You are an academic advisor parsing graduate admissions and program requirements for {school_name}.
-        Analyze the raw text and extract the required fields accurately.
+        You are an academic admissions data engineer extracting structured requirements for:
+        - University: {university_name}
+        - Program: {program_name}
+        - Category: {program_category}
+        - Primary Source URL: {admissions_url}
 
-        Output must be a valid JSON object matching this schema:
-        {{
-            "toefl_overall": "Overall minimum TOEFL score (e.g. '100', '80', 'Not Specified')",
-            "toefl_speaking": "Minimum Speaking section score (e.g. '>= 22', 'N/A')",
-            "gre_status": "GRE requirement status: MUST be one of ['Required', 'Optional', 'Not Required', 'Waived']",
-            "non_thesis_option": "Whether a coursework-only (non-thesis) Master's option is available: MUST be one of ['Yes', 'No', 'Coursework-only']",
-            "notes": "Brief key notes (e.g. required credit hours, max 20 words)"
-        }}
+        CRITICAL ANTI-HALLUCINATION RULES:
+        1. Extract ONLY facts explicitly stated in the provided text.
+        2. Do NOT guess, infer, or fill in default values from outside knowledge.
+        3. If GPA minimum, TOEFL minimum, or deadlines are not explicitly mentioned in the text, return null.
+        4. If STEM designation is not explicitly confirmed in the text, return null.
+        5. Standardize deadlines to YYYY-MM-DD format if year/month/day are clear; otherwise return null.
+        6. Set `source_url` to "{admissions_url}".
 
         Raw Website Content:
-        {combined_text[:15000]}
+        {combined_text[:20000]}
         """
 
-        # Model candidates with full resource prefix based on your API key capability
         candidate_models = [
             "models/gemini-flash-latest",
-            "models/gemini-2.5-pro",
             "models/gemini-3.5-flash",
         ]
 
+        today_str = datetime.now().strftime("%Y-%m-%d")
+
         for model_name in candidate_models:
-            try:
-                response = self.client.models.generate_content(
-                    model=model_name,
-                    contents=prompt,
-                    config=types.GenerateContentConfig(
-                        response_mime_type="application/json",
-                        temperature=0.1,
-                    ),
-                )
+            max_retries = 3
+            for attempt in range(max_retries):
+                try:
+                    time.sleep(3)  # Prevent API rate limit bursts
 
-                result_json = json.loads(response.text)
-                return result_json
+                    response = self.client.models.generate_content(
+                        model=model_name,
+                        contents=prompt,
+                        config=types.GenerateContentConfig(
+                            response_mime_type="application/json",
+                            response_schema=ProgramRequirementSchema,
+                            temperature=0.0,
+                        ),
+                    )
 
-            except Exception as e:
-                print(f"[WARN] Model '{model_name}' failed: {e}. Trying next...")
-                continue
+                    parsed_data = json.loads(response.text)
+                    # Enforce exact metadata fields
+                    parsed_data["university_name"] = university_name
+                    parsed_data["program_name"] = program_name
+                    parsed_data["program_category"] = program_category
+                    parsed_data["source_url"] = admissions_url
+                    parsed_data["last_updated"] = today_str
+                    return parsed_data
 
-        print(f"[ERROR] All candidate Gemini models failed for {school_name}.")
-        return {
-            "toefl_overall": "N/A",
-            "toefl_speaking": "N/A",
-            "gre_status": "Unknown",
-            "non_thesis_option": "Unknown",
-            "notes": "Extraction failed.",
-        }
+                except Exception as e:
+                    err_str = str(e)
+                    if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str:
+                        logger.warning(
+                            f"[RATE LIMIT] Hit 429 on {model_name} (Attempt {attempt+1}/{max_retries}). Sleeping 20s..."
+                        )
+                        time.sleep(20)
+                    else:
+                        logger.warning(f"[MODEL ERROR] {model_name} failed: {e}")
+                        break
+
+        logger.error(f"[FAILED] Extraction failed for {university_name} - {program_name}")
+        fallback_obj = ProgramRequirementSchema(
+            university_name=university_name,
+            program_name=program_name,
+            program_category=program_category,
+            is_stem_designated=None,
+            thesis_required="Not Specified",
+            gpa_minimum=None,
+            toefl_minimum=None,
+            toefl_notes=None,
+            gre_policy="Not Specified",
+            prerequisites=[],
+            source_url=admissions_url,
+            last_updated=today_str,
+        )
+        return fallback_obj.model_dump()
